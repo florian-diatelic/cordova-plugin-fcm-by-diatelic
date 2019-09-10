@@ -1,5 +1,5 @@
 apply plugin: 'com.android.library'
-group 'com.github.andrehtissot'
+group 'com.github.florian-diatelic'
 def hasBuildExtras = file('../../src/android/FCMPlugin.gradle').exists()
 if(hasBuildExtras) {
     apply from: '../../src/android/FCMPlugin.gradle'
