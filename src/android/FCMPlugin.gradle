@@ -1,111 +1,325 @@
-buildscript {
-    ext {
-        // Load system enviroment defined values, or, if unavailable, plugin defaults
-        def ANDROID_GRADLE_TOOLS_VERSION = System.getenv('ANDROID_GRADLE_TOOLS_VERSION') ?: '4.1.0'
+package com.gae.scaffolder.plugin;
+
+import androidx.core.app.NotificationManagerCompat;
+import android.app.NotificationManager;
+import android.content.Context;
+import android.util.Log;
+
+import com.gae.scaffolder.plugin.interfaces.*;
+import com.google.android.gms.tasks.OnCompleteListener;
+import com.google.android.gms.tasks.OnFailureListener;
+import com.google.android.gms.tasks.Task;
+import com.google.firebase.installations.FirebaseInstallations;
+import com.google.firebase.messaging.FirebaseMessaging;
+
+import org.apache.cordova.CallbackContext;
+import org.apache.cordova.CordovaInterface;
+import org.apache.cordova.CordovaPlugin;
+import org.apache.cordova.CordovaWebView;
+import org.apache.cordova.PluginResult;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.util.Map;
+import java.util.Objects;
+
+
+public class FCMPlugin extends CordovaPlugin {
+    public static String notificationEventName = "notification";
+    public static String tokenRefreshEventName = "tokenRefresh";
+    public static Map<String, Object> initialPushPayload;
+    public static final String TAG = "FCMPlugin";
+    private static FCMPlugin instance;
+    protected Context context;
+    protected static CallbackContext jsEventBridgeCallbackContext;
+
+    public FCMPlugin() {}
+    public FCMPlugin(Context context) {
+        this.context = context;
+    }
+
+    public static synchronized FCMPlugin getInstance(Context context) {
+        if (instance == null) {
+            instance = new FCMPlugin(context);
+            instance = getPlugin(instance);
+        }
+
+        return instance;
+    }
+
+    public static synchronized FCMPlugin getInstance() {
+        if (instance == null) {
+            instance = new FCMPlugin();
+            instance = getPlugin(instance);
+        }
+
+        return instance;
+    }
+
+    public static FCMPlugin getPlugin(FCMPlugin plugin) {
+        if (plugin.webView != null) {
+            instance = (FCMPlugin) plugin.webView.getPluginManager().getPlugin(FCMPlugin.class.getName());
+        } else {
+            plugin.initialize(null, null);
+            instance = plugin;
+        }
+
+        return instance;
+    }
+
+    public void initialize(CordovaInterface cordova, CordovaWebView webView) {
+        super.initialize(cordova, webView);
+        Log.d(TAG, "==> FCMPlugin initialize");
+
+        FirebaseMessaging.getInstance().subscribeToTopic("android");
+        FirebaseMessaging.getInstance().subscribeToTopic("all");
+    }
+
+    public boolean execute(final String action, final JSONArray args, final CallbackContext callbackContext) throws JSONException {
+        Log.d(TAG, "==> FCMPlugin execute: " + action);
+
         try {
-            // Load configuration from install variables (package.json) two directories above
-            def PLUGIN_CONFIG = new groovy.json.JsonSlurper().parseText(file("${projectDir}/../../package.json").text).cordova.plugins['cordova-plugin-fcm-with-dependecy-updated']
-            ANDROID_GRADLE_TOOLS_VERSION = PLUGIN_CONFIG.ANDROID_GRADLE_TOOLS_VERSION
-        } catch(Exception e0) {
+            if (action.equals("ready")) {
+                callbackContext.success();
+            } else if (action.equals("startJsEventBridge")) {
+                this.jsEventBridgeCallbackContext = callbackContext;
+            } else if (action.equals("getToken")) {
+                cordova.getActivity().runOnUiThread(new Runnable() {
+                    public void run() {
+                        getToken(callbackContext);
+                    }
+                });
+            } else if (action.equals("getInitialPushPayload")) {
+                cordova.getActivity().runOnUiThread(new Runnable() {
+                    public void run() {
+                        getInitialPushPayload(callbackContext);
+                    }
+                });
+            } else if (action.equals("subscribeToTopic")) {
+                cordova.getThreadPool().execute(new Runnable() {
+                    public void run() {
+                        try {
+                            FirebaseMessaging.getInstance().subscribeToTopic(args.getString(0));
+                            callbackContext.success();
+                        } catch (Exception e) {
+                            callbackContext.error(e.getMessage());
+                        }
+                    }
+                });
+            } else if (action.equals("unsubscribeFromTopic")) {
+                cordova.getThreadPool().execute(new Runnable() {
+                    public void run() {
+                        try {
+                            FirebaseMessaging.getInstance().unsubscribeFromTopic(args.getString(0));
+                            callbackContext.success();
+                        } catch (Exception e) {
+                            callbackContext.error(e.getMessage());
+                        }
+                    }
+                });
+            } else if (action.equals("clearAllNotifications")) {
+                cordova.getThreadPool().execute(new Runnable() {
+                    public void run() {
+                        try {
+                            Context context = cordova.getActivity();
+                            NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+                            nm.cancelAll();
+                            callbackContext.success();
+                        } catch (Exception e) {
+                            callbackContext.error(e.getMessage());
+                        }
+                    }
+                });
+            } else if (action.equals("createNotificationChannel")) {
+                cordova.getActivity().runOnUiThread(new Runnable() {
+                    public void run() {
+                        new FCMPluginChannelCreator(getContext()).createNotificationChannel(callbackContext, args);
+                    }
+                });
+            } else if (action.equals("deleteInstanceId")) {
+                this.deleteInstanceId(callbackContext);
+            } else if (action.equals("hasPermission")) {
+                this.hasPermission(callbackContext);
+            } else {
+                callbackContext.error("Method not found");
+                return false;
+            }
+        } catch (Exception e) {
+            Log.d(TAG, "ERROR: onPluginAction: " + e.getMessage());
+            callbackContext.error(e.getMessage());
+            return false;
+        }
+
+        return true;
+    }
+
+    public void getInitialPushPayload(CallbackContext callback) {
+        if(initialPushPayload == null) {
+            Log.d(TAG, "getInitialPushPayload: null");
+            callback.success((String) null);
+            return;
+        }
+        Log.d(TAG, "getInitialPushPayload");
+        try {
+            JSONObject jo = new JSONObject();
+            for (String key : initialPushPayload.keySet()) {
+                jo.put(key, initialPushPayload.get(key));
+                Log.d(TAG, "\tinitialPushPayload: " + key + " => " + initialPushPayload.get(key));
+            }
+            callback.success(jo);
+        } catch(Exception error) {
             try {
-                // Load configuration from install variables (package.json) three directories above
-                def PLUGIN_CONFIG = new groovy.json.JsonSlurper().parseText(file("${projectDir}/../../../package.json").text).cordova.plugins['cordova-plugin-fcm-with-dependecy-updated']
-                ANDROID_GRADLE_TOOLS_VERSION = PLUGIN_CONFIG.ANDROID_GRADLE_TOOLS_VERSION
-            } catch(Exception e1) {
-                def WARNING_STYLE = "${(char)27}[33;49"+"m"
-                def DEFAULT_STYLE = "${(char)27}[39;49"+"m"
-                print(WARNING_STYLE+"FCMPlugin: Plugin install variables are not accessible, as package.json was unreachable/unreadable."+DEFAULT_STYLE)                
+                callback.error(exceptionToJson(error));
+            }
+            catch (JSONException jsonErr) {
+                Log.e(TAG, "Error when parsing json", jsonErr);
             }
         }
-        // Override config with project values if available
-        ANDROID_GRADLE_TOOLS_VERSION = rootProject.hasProperty('ANDROID_GRADLE_TOOLS_VERSION') ? rootProject.ext.ANDROID_GRADLE_TOOLS_VERSION : ANDROID_GRADLE_TOOLS_VERSION
-        ext.gradleNumberVersion = ANDROID_GRADLE_TOOLS_VERSION.substring(0, ANDROID_GRADLE_TOOLS_VERSION.lastIndexOf(".")).toFloat()
     }
-    repositories {
-        mavenCentral()
-        jcenter()
-        mavenLocal()
-        if (gradleNumberVersion >= 3.4f) {
-            google()
-        }
-    }
-    dependencies {
-        // Load system enviroment defined values, or, if unavailable, plugin defaults
-        def ANDROID_GOOGLE_SERVICES_VERSION = System.getenv('ANDROID_GOOGLE_SERVICES_VERSION') ?: '4.3.4'
-        def ANDROID_GRADLE_TOOLS_VERSION = System.getenv('ANDROID_GRADLE_TOOLS_VERSION') ?: '4.1.0'      
+
+    public void getToken(final TokenListeners<String, JSONObject> callback) {
         try {
-            // Load configuration from install variables (package.json) two directories above
-            def PLUGIN_CONFIG = new groovy.json.JsonSlurper().parseText(file("${projectDir}/../../package.json").text).cordova.plugins['cordova-plugin-fcm-with-dependecy-updated']
-            ANDROID_GOOGLE_SERVICES_VERSION = PLUGIN_CONFIG.ANDROID_GOOGLE_SERVICES_VERSION
-            ANDROID_GRADLE_TOOLS_VERSION = PLUGIN_CONFIG.ANDROID_GRADLE_TOOLS_VERSION
-        } catch(Exception e0) {
+            FirebaseInstallations
+                    .getInstance().getId().addOnCompleteListener(task -> {
+                if (!task.isSuccessful()) {
+                    Log.w(TAG, "getInstanceId failed", task.getException());
+                    try {
+                        callback.error(exceptionToJson(Objects.requireNonNull(task.getException())));
+                    }
+                    catch (JSONException jsonErr) {
+                        Log.e(TAG, "Error when parsing json", jsonErr);
+                    }
+                    return;
+                }
+
+                // Get new Instance ID token
+                String newToken = task.getResult();
+
+                Log.i(TAG, "\tToken: " + newToken);
+                callback.success(newToken);
+            });
+
+            FirebaseInstallations.getInstance().getId().addOnFailureListener(e -> {
+                try {
+                    Log.e(TAG, "Error retrieving token: ", e);
+                    callback.error(exceptionToJson(e));
+                } catch (JSONException jsonErr) {
+                    Log.e(TAG, "Error when parsing json", jsonErr);
+                }
+            });
+        } catch (Exception e) {
+            Log.w(TAG, "\tError retrieving token", e);
             try {
-                // Load configuration from install variables (package.json) three directories above
-                def PLUGIN_CONFIG = new groovy.json.JsonSlurper().parseText(file("${projectDir}/../../../package.json").text).cordova.plugins['cordova-plugin-fcm-with-dependecy-updated']
-                ANDROID_GOOGLE_SERVICES_VERSION = PLUGIN_CONFIG.ANDROID_GOOGLE_SERVICES_VERSION
-                ANDROID_GRADLE_TOOLS_VERSION = PLUGIN_CONFIG.ANDROID_GRADLE_TOOLS_VERSION
-            } catch(Exception e1) {
-                def WARNING_STYLE = "${(char)27}[33;49"+"m"
-                def DEFAULT_STYLE = "${(char)27}[39;49"+"m"
-                print(WARNING_STYLE+"FCMPlugin: Plugin install variables are not accessible, as package.json was unreachable/unreadable."+DEFAULT_STYLE)                
+                callback.error(exceptionToJson(e));
+            } catch(JSONException je) {}
+        }
+    }
+
+    private void deleteInstanceId(final CallbackContext callbackContext) {
+        cordova.getThreadPool().execute(new Runnable() {
+            public void run() {
+                try {
+                    FirebaseInstallations.getInstance().delete();
+                    callbackContext.success();
+                } catch (Exception e) {
+                    callbackContext.error(e.getMessage());
+                }
             }
+        });
+    }
+
+    private void hasPermission(final CallbackContext callbackContext) {
+        cordova.getThreadPool().execute(new Runnable() {
+            public void run() {
+                try {
+                    NotificationManagerCompat notificationManagerCompat =
+                            NotificationManagerCompat.from(cordova.getActivity().getApplicationContext());
+                    callbackContext.success(notificationManagerCompat.areNotificationsEnabled() ? 1 : 0);
+                } catch (Exception e) {
+                    callbackContext.error(e.getMessage());
+                }
+            }
+        });
+    }
+
+    private JSONObject exceptionToJson(final Exception exception) throws JSONException {
+        return new JSONObject() {
+            {
+                put("message", exception.getMessage());
+                put("cause", exception.getClass().getName());
+                put("stacktrace", exception.getStackTrace().toString());
+            }
+        };
+    }
+
+    public void getToken(final CallbackContext callbackContext) {
+        this.getToken(new TokenListeners<String, JSONObject>() {
+            @Override
+            public void success(String message) {
+                callbackContext.success(message);
+            }
+
+            @Override
+            public void error(JSONObject message) {
+                callbackContext.error(message);
+            }
+        });
+    }
+
+    private static void dispatchJSEvent(String eventName, String stringifiedJSONValue) throws Exception {
+        String jsEventData = "[\"" + eventName + "\"," + stringifiedJSONValue + "]";
+        PluginResult dataResult = new PluginResult(PluginResult.Status.OK, jsEventData);
+        dataResult.setKeepCallback(true);
+        if(FCMPlugin.jsEventBridgeCallbackContext == null) {
+            Log.d(TAG, "\tUnable to send event due to unreachable bridge context");
+            return;
         }
-        // Override config with project values if available
-        ANDROID_GOOGLE_SERVICES_VERSION = rootProject.hasProperty('ANDROID_GOOGLE_SERVICES_VERSION') ? rootProject.ext.ANDROID_GOOGLE_SERVICES_VERSION : ANDROID_GOOGLE_SERVICES_VERSION
-        ANDROID_GRADLE_TOOLS_VERSION = rootProject.hasProperty('ANDROID_GRADLE_TOOLS_VERSION') ? rootProject.ext.ANDROID_GRADLE_TOOLS_VERSION : ANDROID_GRADLE_TOOLS_VERSION
-        // Avoid use "GRADLE_VERSION" because jitpack sets this like a environment variable
-        classpath "com.android.tools.build:gradle:${ANDROID_GRADLE_TOOLS_VERSION}"
-        classpath "com.google.gms:google-services:${ANDROID_GOOGLE_SERVICES_VERSION}"
+        FCMPlugin.jsEventBridgeCallbackContext.sendPluginResult(dataResult);
+        Log.d(TAG, "\tSent event: " + eventName + " with " + stringifiedJSONValue);
     }
-}
-repositories {
-    mavenCentral()
-    jcenter()
-    if (gradleNumberVersion >= 3.4f) {
-        google()
+
+    public static void setInitialPushPayload(Map<String, Object> payload) {
+        if(initialPushPayload == null) {
+            initialPushPayload = payload;
+        }
     }
-}
-dependencies {
-    // Load system enviroment defined values, or, if unavailable, plugin defaults
-    def ANDROID_FCM_VERSION = System.getenv('ANDROID_FCM_VERSION') ?: '21.0.0'
-    def ANDROID_FIREBASE_BOM_VERSION = System.getenv('ANDROID_FIREBASE_BOM_VERSION') ?: '26.0.0'
-    try {
-        // Load configuration from install variables (package.json) two directories above
-        def PLUGIN_CONFIG = new groovy.json.JsonSlurper().parseText(file("${projectDir}/../../package.json").text).cordova.plugins['cordova-plugin-fcm-with-dependecy-updated']
-        ANDROID_FCM_VERSION = PLUGIN_CONFIG.ANDROID_FCM_VERSION
-        ANDROID_FIREBASE_BOM_VERSION = PLUGIN_CONFIG.ANDROID_FIREBASE_BOM_VERSION
-    } catch(Exception e0) {
+
+    public static void sendPushPayload(Map<String, Object> payload) {
+        Log.d(TAG, "==> FCMPlugin sendPushPayload");
         try {
-            // Load configuration from install variables (package.json) three directories above
-            def PLUGIN_CONFIG = new groovy.json.JsonSlurper().parseText(file("${projectDir}/../../../package.json").text).cordova.plugins['cordova-plugin-fcm-with-dependecy-updated']
-            ANDROID_FCM_VERSION = PLUGIN_CONFIG.ANDROID_FCM_VERSION
-            ANDROID_FIREBASE_BOM_VERSION = PLUGIN_CONFIG.ANDROID_FIREBASE_BOM_VERSION
-        } catch(Exception e1) {
-            def WARNING_STYLE = "${(char)27}[33;49"+"m"
-            def DEFAULT_STYLE = "${(char)27}[39;49"+"m"
-            print(WARNING_STYLE+"FCMPlugin: Plugin install variables are not accessible, as package.json was unreachable/unreadable."+DEFAULT_STYLE)                
+            JSONObject jo = new JSONObject();
+            for (String key : payload.keySet()) {
+                jo.put(key, payload.get(key));
+                Log.d(TAG, "\tpayload: " + key + " => " + payload.get(key));
+            }
+            FCMPlugin.dispatchJSEvent(notificationEventName, jo.toString());
+        } catch (Exception e) {
+            Log.d(TAG, "\tERROR sendPushPayload: " + e.getMessage());
         }
     }
-    // Override config with project values if available
-    ANDROID_FCM_VERSION = rootProject.hasProperty('ANDROID_FCM_VERSION') ? rootProject.ext.ANDROID_FCM_VERSION : ANDROID_FCM_VERSION
-    ANDROID_FIREBASE_BOM_VERSION = rootProject.hasProperty('ANDROID_FIREBASE_BOM_VERSION') ? rootProject.ext.ANDROID_FIREBASE_BOM_VERSION : ANDROID_FIREBASE_BOM_VERSION
-    if (gradleNumberVersion < 3.4f) {
-        def WARNING_STYLE = "${(char)27}[33;49"+"m"
-        def DEFAULT_STYLE = "${(char)27}[39;49"+"m"
-        print(WARNING_STYLE+"FCMPlugin: Support for Gradle v3.3 or lower is deprecated. Please upgrade to a newer version."+DEFAULT_STYLE)
-        compile "com.google.firebase:firebase-messaging:${ANDROID_FCM_VERSION}"
-    } else if (gradleNumberVersion < 5.0f) {
-        def WARNING_STYLE = "${(char)27}[33;49"+"m"
-        def DEFAULT_STYLE = "${(char)27}[39;49"+"m"
-        print(WARNING_STYLE+"FCMPlugin: Support for Gradle v4 or lower is deprecated. Please upgrade to a newer version."+DEFAULT_STYLE)
-        implementation "com.google.firebase:firebase-messaging:${ANDROID_FCM_VERSION}"
-    } else {
-        implementation platform("com.google.firebase:firebase-bom:${ANDROID_FIREBASE_BOM_VERSION}")
-        implementation "com.google.firebase:firebase-messaging"
+
+    public static void sendTokenRefresh(String token) {
+        Log.d(TAG, "==> FCMPlugin sendTokenRefresh");
+        try {
+            FCMPlugin.dispatchJSEvent(tokenRefreshEventName, "\"" + token + "\"");
+        } catch (Exception e) {
+            Log.d(TAG, "\tERROR sendTokenRefresh: " + e.getMessage());
+        }
     }
-}
-// apply plugin: 'com.google.gms.google-services'
-// class must be used instead of id(string) to be able to apply plugin from non-root gradle file
-if (!project.plugins.hasPlugin('com.google.gms.google-services')) {
-    apply plugin: com.google.gms.googleservices.GoogleServicesPlugin
+
+    @Override
+    public void onDestroy() {
+        initialPushPayload = null;
+        jsEventBridgeCallbackContext = null;
+    }
+
+    protected Context getContext() {
+        context = cordova != null ? cordova.getActivity().getBaseContext() : context;
+        if (context == null) {
+            throw new RuntimeException("The Android Context is required. Verify if the 'activity' or 'context' are passed by constructor");
+        }
+
+        return context;
+    }
 }
